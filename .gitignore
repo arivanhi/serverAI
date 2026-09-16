@@ -1,3 +1,5 @@
 /emqx_data
 /qdrant_data
 /redis_data
+/.env
+/emqx_bootstrap_users.csv

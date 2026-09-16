@@ -1,9 +1,11 @@
+name: tremku
+
 services:
   ollama:
     image: ollama/ollama:latest
     container_name: tremku_llm
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - D:/ollama_cache:/root/.ollama
     deploy:
@@ -12,38 +14,134 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [ gpu ]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
     restart: unless-stopped
 
   qdrant:
     image: qdrant/qdrant:latest
     container_name: tremku_memory
     ports:
-      - "6333:6333"
+      - "127.0.0.1:6333:6333"
     volumes:
       - ./qdrant_data:/qdrant/storage
     restart: unless-stopped
 
   emqx:
-    image: emqx/emqx:latest
+    image: emqx/emqx:6.3.0
     container_name: tremku_telemetry
     environment:
-      - EMQX_ALLOW_ANONYMOUS=true
-      - EMQX_DASHBOARD__DEFAULT_USERNAME=admin
-      - EMQX_DASHBOARD__DEFAULT_PASSWORD=public
+      EMQX_DASHBOARD__DEFAULT_USERNAME: admin
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD}
+      EMQX_NODE__COOKIE: ${EMQX_NODE_COOKIE}
     ports:
-      - "1883:1883"
-      - "8083:8083"
-      - "18083:18083"
+      - "127.0.0.1:1883:1883"
+      - "127.0.0.1:8083:8083"
+      - "127.0.0.1:18083:18083"
     volumes:
       - ./emqx_data:/opt/emqx/data
+      - ./emqx-base.hocon:/opt/emqx/etc/base.hocon:ro
+      - ./emqx_bootstrap_users.csv:/opt/emqx/etc/auth-built-in-db-bootstrap.csv:ro
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     container_name: tremku_session
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - ./redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a '${REDIS_PASSWORD}' ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
+
+  agent-api:
+    build:
+      context: ../tremagent/tremku-agents
+    container_name: tremku_agent_api
+    environment:
+      NODE_ENV: production
+      PORT: 3100
+      OPENAI_API_BASE: http://ollama:11434/v1
+      OPENAI_API_KEY: local-ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      OPENCLAW_MODEL: ${OLLAMA_MODEL}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      MQTT_BROKER_URL: mqtt://emqx:1883
+      MQTT_USERNAME: ${MQTT_USERNAME}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+      AGENT_API_KEY: ${AGENT_API_KEY}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      TELEMETRY_STALE_SECONDS: 10
+      COMMAND_ACK_TIMEOUT_MS: 3000
+      HEARTBEAT_TIMEZONE: ${HEARTBEAT_TIMEZONE:-Asia/Bangkok}
+      HEARTBEAT_HOUR: ${HEARTBEAT_HOUR:-6}
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ../tremagent/tremku-agents/data:/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  voice:
+    build:
+      context: ../tremagent/tremku-voice
+    container_name: tremku_voice
+    environment:
+      AGENT_API_URL: http://agent-api:3100
+      AGENT_API_KEY: ${AGENT_API_KEY}
+      WHISPER_MODEL: ${WHISPER_MODEL}
+      VOICE_AGENT: DINUS
+      HF_HOME: /models/huggingface
+      HF_HUB_DISABLE_XET: "1"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - D:/tremku_models/huggingface:/models/huggingface
+    depends_on:
+      agent-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+networks:
+  default:
+    name: tremku_internal
