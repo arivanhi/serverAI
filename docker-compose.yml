@@ -5,7 +5,7 @@ services:
     ports:
       - "11434:11434"
     volumes:
-      - ~/.ollama:/root/.ollama
+      - D:/ollama_cache:/root/.ollama
     deploy:
       resources:
         reservations:
